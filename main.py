@@ -1,4 +1,3 @@
-
 import shutil
 import sys
 import os
@@ -10,9 +9,9 @@ import pyudev
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTreeView, QVBoxLayout, QWidget, QAction,
     QMenu, QMessageBox, QInputDialog, QFileSystemModel, QLineEdit, QPushButton, QToolBar, QShortcut,
-    QTextEdit
+    QTextEdit, QAbstractItemView
 )
-from PyQt5.QtCore import QModelIndex, Qt, QFileInfo
+from PyQt5.QtCore import QModelIndex, Qt, QFileInfo, QTimer
 from PyQt5.QtGui import QKeySequence
 
 from System.folders import create_trash, create_system_folder, create_initial_folders, create_logs
@@ -40,6 +39,12 @@ class SuperApp(QMainWindow):
     def __init__(self):
         super().__init__()
 
+        self.dialog = None
+        self.add_tasks = None
+        self.users_info = None
+        self.user_processes = None
+        self.all_processes = None
+        self.target_directory = None
         self.observer = None
         self.monitor = None
         self.udev_context = None
@@ -164,6 +169,11 @@ class SuperApp(QMainWindow):
 
         self.setAcceptDrops(True)
         self.tree.setDragEnabled(True)
+        self.tree.setSelectionMode(self.tree.SingleSelection)
+        self.tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+        self.model.setReadOnly(False)
 
         self.log_widget = QTextEdit()
         layout.addWidget(self.log_widget)
@@ -184,20 +194,11 @@ class SuperApp(QMainWindow):
         self.observer = pyudev.MonitorObserver(self.monitor, self.handle_device_event)
         self.observer.start()
 
+        self.target_directory = None
+
+
     def show_all_tasks(self):
-        all_processes = list(psutil.process_iter())
-        user_processes = [p for p in all_processes if p.username() != 'root']
-
-        users_info = subprocess.check_output(["w"]).decode("utf-8")
-        user_processes_count = len(user_processes)
-        total_processes_count = len(all_processes)
-
-        add_tasks = {
-            "Количество пользовательских процессов:": f"{user_processes_count}",
-            "Всего процессов:": f"{total_processes_count}"
-        }
-
-        dialog = TasksDialog(add_tasks, users_info, self)
+        dialog = TasksDialog()
         dialog.exec_()
 
     def handle_device_event(self, action, device):
@@ -351,6 +352,7 @@ class SuperApp(QMainWindow):
                 if self.is_system_folder(url.toLocalFile()):
                     event.ignore()
                     return
+                print(url.toLocalFile())
             event.acceptProposedAction()
 
     def dragMoveEvent(self, event):
@@ -360,42 +362,27 @@ class SuperApp(QMainWindow):
                 if self.is_system_folder(url.toLocalFile()):
                     event.ignore()
                     return
+                # print(url.toLocalFile())
+                if os.path.isdir(url.toLocalFile()):
+                    self.target_directory = url.toLocalFile()
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        destination_index = self.tree.indexAt(event.pos())
-        destination_folder = self.model.filePath(destination_index)
-
-        if not os.path.exists(destination_folder):
-            destination_folder = self.get_destination_folder(event.pos())
-
-        for url in event.mimeData().urls():
-            file_path = str(url.toLocalFile())
-            file_name = os.path.basename(file_path)
-            destination_path = os.path.join(destination_folder, file_name)
-
-            if os.path.commonpath([file_path, destination_path]) == os.path.commonpath([file_path]):
-                continue
-
-            if os.path.exists(file_path) and os.path.exists(destination_path):
-                if not os.path.samefile(file_path, destination_path):
-                    if os.path.isdir(file_path):
-                        shutil.move(file_path, destination_path)
-                        self.model.setRootPath('')
-                        self.model.setRootPath(destination_folder)
-                    elif os.path.isfile(file_path):
-                        shutil.move(file_path, destination_path)
-                        self.model.setRootPath('')
-                        self.model.setRootPath(destination_folder)
-            elif os.path.exists(file_path) and not os.path.exists(destination_path):
-                if os.path.isdir(file_path):
-                    shutil.move(file_path, destination_path)
-                    self.model.setRootPath('')
-                    self.model.setRootPath(destination_folder)
-                elif os.path.isfile(file_path):
-                    shutil.move(file_path, destination_path)
-                    self.model.setRootPath('')
-                    self.model.setRootPath(destination_folder)
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            for url in urls:
+                file_path = url.toLocalFile()
+                print(file_path)
+                # # Проверяем, является ли перемещаемый объект файлом или папкой
+                # if os.path.isfile(file_path):
+                #     # Перемещаем файлы
+                #     destination_path = os.path.join(self.target_directory, os.path.basename(file_path))
+                #     shutil.move(file_path, destination_path)
+                # elif os.path.isdir(file_path):
+                #     # Перемещаем папки
+                #     destination_path = os.path.join(self.target_directory, os.path.basename(file_path))
+                #     print(destination_path)
+                #     shutil.move(file_path, destination_path)
 
     def is_system_folder(self, folder_path):
         system_folders = ["System", "Корзина"]
@@ -736,7 +723,6 @@ class SuperApp(QMainWindow):
             self.model.setRootPath('')
             self.model.setRootPath(root_path)
             return
-
 
         matches = self.find_items(search_text, Qt.MatchContains | Qt.MatchRecursive, 0)
 

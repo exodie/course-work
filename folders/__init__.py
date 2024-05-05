@@ -1,6 +1,6 @@
 import os
 
-from shared import DEFAULT_DIR_CATALOG
+from System.shared import DEFAULT_DIR_CATALOG
 
 
 def create_trash():
