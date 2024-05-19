@@ -1,25 +1,33 @@
 import shutil
-import sys
 import os
 import subprocess
 import logging
-import psutil
+
 import pyudev
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTreeView, QVBoxLayout, QWidget, QAction,
     QMenu, QMessageBox, QInputDialog, QFileSystemModel, QLineEdit, QPushButton, QToolBar, QShortcut,
-    QTextEdit, QAbstractItemView
+    QTextEdit
 )
-from PyQt5.QtCore import QModelIndex, Qt, QFileInfo, QTimer
-from PyQt5.QtGui import QKeySequence
+from PyQt5.QtCore import QModelIndex, Qt, QFileInfo
+from PyQt5.QtGui import QKeySequence, QDrag
 
 from System.folders import create_trash, create_system_folder, create_initial_folders, create_logs
 from System.logs import LogFileDialog, create_logs_with_msg
 from System.queue import send_message
 from System.shared import DEFAULT_DIR_CATALOG, directory_size
-from System.tasks import TasksDialog
+from System.tasks import DataWindow, UserTableWindow
 from System.terminal import TerminalWindow
+
+import sys
+import psutil
+import threading
+import time
+
+from sysv_ipc import IPC_CREAT, MessageQueue
+
+KEYS = [1234, 1235, 1236]
 
 
 class CustomFileSystemModel(QFileSystemModel):
@@ -39,6 +47,10 @@ class SuperApp(QMainWindow):
     def __init__(self):
         super().__init__()
 
+        self.queues = None
+        self.windows = None
+        self.data_thread = None
+        self.show_tasks_signal = None
         self.dialog = None
         self.add_tasks = None
         self.users_info = None
@@ -64,7 +76,7 @@ class SuperApp(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle('Суперапп-0.9')
+        self.setWindowTitle('Суперапп-1.0')
         self.setGeometry(100, 100, 800, 600)
 
         create_trash()
@@ -86,7 +98,7 @@ class SuperApp(QMainWindow):
         about_menu.addAction(shortcut_action)
 
         show_all_tasks_action = QAction('Открыть все задания', self)
-        show_all_tasks_action.triggered.connect(self.show_all_tasks)
+        show_all_tasks_action.triggered.connect(self.open_windows)
         tasks_menu.addAction(show_all_tasks_action)
 
         open_terminal_action = QAction('Системный терминал', self)
@@ -119,6 +131,13 @@ class SuperApp(QMainWindow):
         self.tree.setRootIndex(self.model.index(DEFAULT_DIR_CATALOG))
         self.tree.setContextMenuPolicy(3)
         self.tree.customContextMenuRequested.connect(self.show_context_menu)
+        self.tree.setDragEnabled(True)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+
+        self.tree.startDrag = self.startDrag
+        self.tree.dragMoveEvent = self.dragMoveEvent
+        self.tree.dropEvent = self.dropEvent
 
         layout = QVBoxLayout()
         layout.addWidget(self.tree)
@@ -167,14 +186,6 @@ class SuperApp(QMainWindow):
         recovery_file_shortcut = QShortcut(QKeySequence("Ctrl+I"), self)
         recovery_file_shortcut.activated.connect(self.restore_item)
 
-        self.setAcceptDrops(True)
-        self.tree.setDragEnabled(True)
-        self.tree.setSelectionMode(self.tree.SingleSelection)
-        self.tree.setDragDropMode(QAbstractItemView.InternalMove)
-        self.tree.setAcceptDrops(True)
-        self.tree.setDropIndicatorShown(True)
-        self.model.setReadOnly(False)
-
         self.log_widget = QTextEdit()
         layout.addWidget(self.log_widget)
 
@@ -196,10 +207,39 @@ class SuperApp(QMainWindow):
 
         self.target_directory = None
 
+        self.queues = [MessageQueue(key, IPC_CREAT) for key in KEYS]
 
-    def show_all_tasks(self):
-        dialog = TasksDialog()
-        dialog.exec_()
+        self.windows = []
+
+        self.data_thread = threading.Thread(target=self.collect_data)
+        self.data_thread.daemon = True
+        self.data_thread.start()
+
+    def open_windows(self):
+        if not self.windows:
+            for i in range(3):
+                if i == 0:
+                    window = UserTableWindow(KEYS[i], i+1)
+                else:
+                    window = DataWindow(KEYS[i], i+1)
+                self.windows.append(window)
+                window.show()
+
+    def collect_data(self):
+        while True:
+            users = psutil.users()
+            user_info = [f"{user.name} {user.terminal} {user.host} {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(user.started))}" for user in users]
+            user_info_str = "\n".join(user_info)
+
+            total_processes = f"Total Processes: {len(psutil.pids())}"
+            user_processes = f"User Processes: {len([p for p in psutil.process_iter(['username']) if p.info['username'] == psutil.Process().username()])}"
+
+            messages = [user_info_str, total_processes, user_processes]
+
+            for i in range(3):
+                self.queues[i].send(messages[i].encode(), block=False)
+
+            time.sleep(5)
 
     def handle_device_event(self, action, device):
         if action == 'add' and 'ID_FS_TYPE' in device:
@@ -245,7 +285,7 @@ class SuperApp(QMainWindow):
 
             queue_message = f"REMOVE_DEVICE|{device_name}"
             log_message = f"Device {device_name} successfully disconnected."
-            log_path = "../logs/actions.log"
+            log_path = "logs/actions.log"
 
             self.update_processes(queue_message, log_message, log_path)
 
@@ -276,7 +316,7 @@ class SuperApp(QMainWindow):
 
             queue_message = f"MOVE_FILE|{file_path}"
             log_message = f"Файл {os.path.basename(file_path)} успешно скопирован."
-            log_path = "../logs/actions.log"
+            log_path = "logs/actions.log"
 
             self.update_processes(queue_message, log_message, log_path)
         else:
@@ -310,7 +350,7 @@ class SuperApp(QMainWindow):
 
         queue_message = f"PASTE_ITEM||{destination_path}"
         log_message = f"Файл {os.path.basename(self.clipboard_path)} успешно вставлен в {destination_folder}."
-        log_path = "../logs/actions.log"
+        log_path = "logs/actions.log"
 
         self.update_processes(queue_message, log_message, log_path)
 
@@ -318,87 +358,58 @@ class SuperApp(QMainWindow):
         self.terminal = TerminalWindow()
         self.terminal.show()
 
-        log_message = "Терминал успешно открыт."
-        self.log_widget.append(log_message)
-
     def open_system_terminal(self):
         subprocess.Popen(['gnome-terminal'])
-
-        log_message = "Системный терминал успешно открыт."
-        self.log_widget.append(log_message)
 
     def open_system_browser(self):
         subprocess.Popen(['xdg-open', 'https://www.google.com/'])
 
-        log_message = "Браузер успешно открыт."
-        self.log_widget.append(log_message)
-
     def open_system_monitor(self):
         subprocess.Popen(['gnome-system-monitor'])
-
-        log_message = "Системный монитор успешно открыт."
-        self.log_widget.append(log_message)
 
     def open_system_calculator(self):
         subprocess.Popen(['gnome-calculator'])
 
-        log_message = "Калькулятор успешно открыт."
-        self.log_widget.append(log_message)
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            for url in urls:
-                if self.is_system_folder(url.toLocalFile()):
-                    event.ignore()
-                    return
-                print(url.toLocalFile())
-            event.acceptProposedAction()
+    def startDrag(self, supportedActions):
+        drag = QDrag(self.tree)
+        mime_data = self.model.mimeData(self.tree.selectedIndexes())
+        drag.setMimeData(mime_data)
+        drag.exec_(Qt.MoveAction)
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            for url in urls:
-                if self.is_system_folder(url.toLocalFile()):
-                    event.ignore()
-                    return
-                # print(url.toLocalFile())
-                if os.path.isdir(url.toLocalFile()):
-                    self.target_directory = url.toLocalFile()
-            event.acceptProposedAction()
+        target_index = self.tree.indexAt(event.pos())
+        target_path = self.model.filePath(target_index)
+
+        if self.is_system_folder(target_path) and not target_path.endswith("Корзина"):
+            event.ignore()
+        else:
+            event.accept()
 
     def dropEvent(self, event):
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            for url in urls:
-                file_path = url.toLocalFile()
-                print(file_path)
-                # # Проверяем, является ли перемещаемый объект файлом или папкой
-                # if os.path.isfile(file_path):
-                #     # Перемещаем файлы
-                #     destination_path = os.path.join(self.target_directory, os.path.basename(file_path))
-                #     shutil.move(file_path, destination_path)
-                # elif os.path.isdir(file_path):
-                #     # Перемещаем папки
-                #     destination_path = os.path.join(self.target_directory, os.path.basename(file_path))
-                #     print(destination_path)
-                #     shutil.move(file_path, destination_path)
+        source_indexes = self.tree.selectedIndexes()
+        target_index = self.tree.indexAt(event.pos())
+        target_path = self.model.filePath(target_index)
+
+        if self.is_system_folder(target_path):
+            if not target_path.endswith("Корзина"):
+                event.setDropAction(Qt.IgnoreAction)
+                event.ignore()
+                return
+        else:
+            for source_index in source_indexes:
+                source_path = self.model.filePath(source_index)
+                base_name = os.path.basename(source_path)
+                new_path = os.path.join(target_path, base_name)
+                if os.path.exists(new_path):
+                    return
+                os.rename(source_path, new_path)
+
+        self.model.setRootPath(DEFAULT_DIR_CATALOG)
 
     def is_system_folder(self, folder_path):
-        system_folders = ["System", "Корзина"]
+        restricted_folders = ['Система']
         folder_name = os.path.basename(folder_path)
-        return folder_name in system_folders
-
-    def get_destination_folder(self, position):
-        index = self.tree.indexAt(position)
-        if index.isValid():
-            file_path = self.model.filePath(index)
-            if os.path.isdir(file_path):
-                return file_path
-            else:
-                return os.path.dirname(file_path)
-        else:
-            return self.model.rootPath()
+        return folder_name in restricted_folders
 
     def show_about_info(self):
         QMessageBox.information(self, 'О программе',
@@ -408,7 +419,7 @@ class SuperApp(QMainWindow):
 
         queue_message = "ABOUT_INFO"
         log_message = f"Вкладка 'О программе' успешно открыта."
-        log_path = "../logs/actions.log"
+        log_path = "logs/actions.log"
 
         self.update_processes(queue_message, log_message, log_path)
 
@@ -424,7 +435,7 @@ class SuperApp(QMainWindow):
 
         queue_message = "SHORTCUTS"
         log_message = f"Вкладка 'Горячие клавиши' успешно открыта."
-        log_path = "../logs/actions.log"
+        log_path = "logs/actions.log"
 
         self.update_processes(queue_message, log_message, log_path)
 
@@ -441,7 +452,7 @@ class SuperApp(QMainWindow):
 
                 queue_message = f"OPEN_ITEM|{file_path}"
                 log_message = f"Файл {file_path} успешно открыт."
-                log_path = "../logs/actions.log"
+                log_path = "logs/actions.log"
 
                 self.update_processes(queue_message, log_message, log_path)
         else:
