@@ -8,14 +8,14 @@ import pyudev
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTreeView, QVBoxLayout, QWidget, QAction,
     QMenu, QMessageBox, QInputDialog, QFileSystemModel, QLineEdit, QPushButton, QToolBar, QShortcut,
-    QTextEdit
+    QTextEdit, QAbstractItemView
 )
-from PyQt5.QtCore import QModelIndex, Qt, QFileInfo
-from PyQt5.QtGui import QKeySequence, QDrag
+from PyQt5.QtCore import QModelIndex, Qt, QFileInfo, QTimer
+from PyQt5.QtGui import QKeySequence
 
 from System.folders import create_trash, create_system_folder, create_initial_folders, create_logs
 from System.logs import LogFileDialog, create_logs_with_msg
-from System.queue import send_message
+from System.queue import send_message, msg_queue
 from System.shared import DEFAULT_DIR_CATALOG, directory_size
 from System.tasks import DataWindow, UserTableWindow
 from System.terminal import TerminalWindow
@@ -131,13 +131,6 @@ class SuperApp(QMainWindow):
         self.tree.setRootIndex(self.model.index(DEFAULT_DIR_CATALOG))
         self.tree.setContextMenuPolicy(3)
         self.tree.customContextMenuRequested.connect(self.show_context_menu)
-        self.tree.setDragEnabled(True)
-        self.tree.setAcceptDrops(True)
-        self.tree.setDropIndicatorShown(True)
-
-        self.tree.startDrag = self.startDrag
-        self.tree.dragMoveEvent = self.dragMoveEvent
-        self.tree.dropEvent = self.dropEvent
 
         layout = QVBoxLayout()
         layout.addWidget(self.tree)
@@ -186,6 +179,14 @@ class SuperApp(QMainWindow):
         recovery_file_shortcut = QShortcut(QKeySequence("Ctrl+I"), self)
         recovery_file_shortcut.activated.connect(self.restore_item)
 
+        self.setAcceptDrops(True)
+        self.tree.setDragEnabled(True)
+        self.tree.setSelectionMode(self.tree.SingleSelection)
+        self.tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+        self.model.setReadOnly(False)
+
         self.log_widget = QTextEdit()
         layout.addWidget(self.log_widget)
 
@@ -193,7 +194,7 @@ class SuperApp(QMainWindow):
         select_log_button.clicked.connect(self.select_log_file)
         layout.addWidget(select_log_button)
 
-        self.update_processes("APP|RUN", "Application is started", "../logs/actions.log")
+        self.update_processes("APP|RUN", "Application is started", "logs/actions.log")
 
         self.terminalButton = QPushButton("Терминал")
         toolbar.addWidget(self.terminalButton)
@@ -219,18 +220,16 @@ class SuperApp(QMainWindow):
         if not self.windows:
             for i in range(3):
                 if i == 0:
-                    window = UserTableWindow(KEYS[i], i + 1)
+                    window = UserTableWindow(KEYS[i], i+1)
                 else:
-                    window = DataWindow(KEYS[i], i + 1)
+                    window = DataWindow(KEYS[i], i+1)
                 self.windows.append(window)
                 window.show()
 
     def collect_data(self):
         while True:
             users = psutil.users()
-            user_info = [
-                f"{user.name} {user.terminal} {user.host} {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(user.started))}"
-                for user in users]
+            user_info = [f"{user.name} {user.terminal} {user.host} {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(user.started))}" for user in users]
             user_info_str = "\n".join(user_info)
 
             total_processes = f"Total Processes: {len(psutil.pids())}"
@@ -242,6 +241,35 @@ class SuperApp(QMainWindow):
                 self.queues[i].send(messages[i].encode(), block=False)
 
             time.sleep(5)
+
+
+    def show_all_tasks(self):
+        self.shared.exec_()
+
+    def open_tasks_dialog(self):
+        self.update_data()
+
+    def update_data(self):
+        while True:
+            try:
+                message, _ = msg_queue.receive()  # Получаем сообщение из очереди
+                data_parts = message.decode().split('\n')
+
+                # Проверяем, содержит ли строка числовые значения
+                if not data_parts[1].isdigit() or not data_parts[2].isdigit():
+                    continue
+
+                # Разбираем сообщение на составляющие
+                rows, user_processes, all_processes = data_parts[:3]
+
+                # Обновляем интерфейс в главном потоке через QTimer.singleShot()
+                QTimer.singleShot(0, lambda: self.tasks_dialog.update_table({
+                    "rows": rows.strip().split('\n'),
+                    "user_processes": int(user_processes),
+                    "all_processes": int(all_processes)
+                }))
+            except Exception as e:
+                print("Error:", e)  # Обработка ошибок при получении данных из очереди
 
     def handle_device_event(self, action, device):
         if action == 'add' and 'ID_FS_TYPE' in device:
@@ -372,46 +400,60 @@ class SuperApp(QMainWindow):
     def open_system_calculator(self):
         subprocess.Popen(['gnome-calculator'])
 
-    def startDrag(self, supportedActions):
-        drag = QDrag(self.tree)
-        mime_data = self.model.mimeData(self.tree.selectedIndexes())
-        drag.setMimeData(mime_data)
-        drag.exec_(Qt.MoveAction)
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            for url in urls:
+                if self.is_system_folder(url.toLocalFile()):
+                    event.ignore()
+                    return
+                print(url.toLocalFile())
+            event.acceptProposedAction()
 
     def dragMoveEvent(self, event):
-        target_index = self.tree.indexAt(event.pos())
-        target_path = self.model.filePath(target_index)
-
-        if self.is_system_folder(target_path) and not target_path.endswith("Корзина"):
-            event.ignore()
-        else:
-            event.accept()
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            for url in urls:
+                if self.is_system_folder(url.toLocalFile()):
+                    event.ignore()
+                    return
+                # print(url.toLocalFile())
+                if os.path.isdir(url.toLocalFile()):
+                    self.target_directory = url.toLocalFile()
+            event.acceptProposedAction()
 
     def dropEvent(self, event):
-        source_indexes = self.tree.selectedIndexes()
-        target_index = self.tree.indexAt(event.pos())
-        target_path = self.model.filePath(target_index)
-
-        if self.is_system_folder(target_path):
-            if not target_path.endswith("Корзина"):
-                event.setDropAction(Qt.IgnoreAction)
-                event.ignore()
-                return
-        else:
-            for source_index in source_indexes:
-                source_path = self.model.filePath(source_index)
-                base_name = os.path.basename(source_path)
-                new_path = os.path.join(target_path, base_name)
-                if os.path.exists(new_path):
-                    return
-                os.rename(source_path, new_path)
-
-        self.model.setRootPath(DEFAULT_DIR_CATALOG)
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            for url in urls:
+                file_path = url.toLocalFile()
+                print(file_path)
+                # # Проверяем, является ли перемещаемый объект файлом или папкой
+                # if os.path.isfile(file_path):
+                #     # Перемещаем файлы
+                #     destination_path = os.path.join(self.target_directory, os.path.basename(file_path))
+                #     shutil.move(file_path, destination_path)
+                # elif os.path.isdir(file_path):
+                #     # Перемещаем папки
+                #     destination_path = os.path.join(self.target_directory, os.path.basename(file_path))
+                #     print(destination_path)
+                #     shutil.move(file_path, destination_path)
 
     def is_system_folder(self, folder_path):
-        restricted_folders = ['Система']
+        system_folders = ["System", "Корзина"]
         folder_name = os.path.basename(folder_path)
-        return folder_name in restricted_folders
+        return folder_name in system_folders
+
+    def get_destination_folder(self, position):
+        index = self.tree.indexAt(position)
+        if index.isValid():
+            file_path = self.model.filePath(index)
+            if os.path.isdir(file_path):
+                return file_path
+            else:
+                return os.path.dirname(file_path)
+        else:
+            return self.model.rootPath()
 
     def show_about_info(self):
         QMessageBox.information(self, 'О программе',
@@ -773,6 +815,482 @@ class SuperApp(QMainWindow):
 
         self.update_processes(queue_message, log_message, log_path)
         return matches
+
+
+class TerminalWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.runButton = None
+        self.commandInput = None
+        self.terminalOutput = None
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle('Терминал')
+        self.setGeometry(100, 100, 600, 400)
+
+        layout = QVBoxLayout()
+
+        self.terminalOutput = QTextEdit()
+        self.terminalOutput.setReadOnly(True)
+        layout.addWidget(self.terminalOutput)
+
+        send_message = QShortcut(QKeySequence("Ctrl+Enter"), self)
+        send_message.activated.connect(self.execute_command)
+
+        self.commandInput = QLineEdit()
+        self.commandInput.setPlaceholderText("Введите команду")
+        layout.addWidget(self.commandInput)
+
+        self.runButton = QPushButton("Выполнить")
+        layout.addWidget(self.runButton)
+        self.runButton.clicked.connect(self.execute_command)
+
+        self.setLayout(layout)
+
+    def execute_command(self):
+        command = self.commandInput.text().strip()
+
+        allowed_commands = [
+            'help', 'clear', 'ps', 'top', 'kill',
+            'lsof', 'fdisk', 'mount', 'unmount', 'dmesg',
+            'lsusb', 'lspci', 'lsblk', 'iwconfig', 'ifup', 'ifdown'
+        ]
+
+        if command.split()[0] not in allowed_commands:
+            self.terminalOutput.append("Недопустимая команда!")
+            return
+
+        getattr(self, command.split()[0])()
+
+    def help(self):
+        help_text = """
+        Доступные команды:
+        - help: Справочная информация о доступных командах
+        - clear: Очистка экрана
+        - ps: Просмотр запущенных процессов
+        - top: Просмотр текущих процессов
+        - kill: Завершение процесса
+        - lsof: Список открытых файлов
+        - fdisk: Управление разделами диска
+        - mount: Монтирование файловых систем
+        - unmount: Демонтирование файловых систем
+        - dmesg: Просмотр системных сообщений
+        - lsusb: Просмотр USB устройств
+        - lspci: Просмотр PCI устройств
+        - lsblk: Просмотр блочных устройств
+        - iwconfig: Конфигурация беспроводных сетей
+        - ifup: Включение сетевого интерфейса
+        - ifdown: Выключение сетевого интерфейса
+        """
+
+        self.terminalOutput.append(help_text)
+        self.commandInput.clear()
+
+    def clear(self):
+        self.terminalOutput.clear()
+        self.commandInput.clear()
+
+    def ps(self):
+        try:
+            processes = []
+            for proc in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 'memory_info']):
+                try:
+                    proc_info = proc.info
+                    processes.append(
+                        f"{proc_info['pid']:>5} {proc_info['username']:<15} {proc_info['cpu_percent']:>5}% {proc_info['memory_info'].rss / 1024 ** 2:>8.2f} MB {proc_info['name']}")
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+            output = "\n".join(processes)
+            self.terminalOutput.append(output)
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def top(self):
+        try:
+            output = []
+
+            load_avg = psutil.getloadavg()
+            mem = psutil.virtual_memory()
+            swap = psutil.swap_memory()
+            uptime = datetime.datetime.now() - datetime.datetime.fromtimestamp(psutil.boot_time())
+
+            output.append(f"System Uptime: {uptime}")
+            output.append(f"Load Average: {load_avg[0]:.2f}, {load_avg[1]:.2f}, {load_avg[2]:.2f}")
+            output.append(f"Total Memory: {mem.total / 1024 ** 2:.2f} MB")
+            output.append(f"Used Memory: {mem.used / 1024 ** 2:.2f} MB ({mem.percent}%)")
+            output.append(f"Free Memory: {mem.free / 1024 ** 2:.2f} MB")
+            output.append(f"Total Swap: {swap.total / 1024 ** 2:.2f} MB")
+            output.append(f"Used Swap: {swap.used / 1024 ** 2:.2f} MB ({swap.percent}%)")
+            output.append(f"Free Swap: {swap.free / 1024 ** 2:.2f} MB")
+            output.append("")
+
+            processes = []
+            for proc in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 'memory_info']):
+                try:
+                    proc_info = proc.info
+                    processes.append((proc_info['cpu_percent'], proc_info))
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+
+            processes.sort(key=lambda x: x[0], reverse=True)
+
+            output.append(f"{'PID':>5} {'USER':<15} {'%CPU':>5} {'%MEM':>5} {'RSS (MB)':>10} COMMAND")
+            for cpu_percent, proc_info in processes[:10]:
+                rss = proc_info['memory_info'].rss / 1024 ** 2
+                output.append(
+                    f"{proc_info['pid']:>5} {proc_info['username']:<15} {cpu_percent:>5.1f} {rss / mem.total * 100:>5.1f} {rss:>10.2f} {proc_info['name']}")
+
+            self.terminalOutput.append("\n".join(output))
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def kill(self):
+        try:
+            process_id = self.commandInput.text().split()[1] if len(self.commandInput.text().split()) > 1 else ''
+            if process_id.isdigit():
+                result = subprocess.run(['kill', process_id], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                output = result.stdout.decode() if result.stdout else result.stderr.decode()
+                self.terminalOutput.append(output)
+            else:
+                self.terminalOutput.append("Некорректный идентификатор процесса")
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def lsof(self):
+        try:
+            output = []
+
+            for proc in psutil.process_iter(['pid', 'name', 'username']):
+                try:
+                    files = proc.open_files()
+                    if files:
+                        for file in files:
+                            output.append(
+                                f"{proc.info['pid']:>5} {proc.info['username']:<15} {proc.info['name']:<25} {file.path}")
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+
+            if output:
+                self.terminalOutput.append("\n".join(output))
+            else:
+                self.terminalOutput.append("Нет открытых файлов.")
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def fdisk(self):
+        try:
+            output = []
+
+            partitions = psutil.disk_partitions()
+            for partition in partitions:
+                output.append(f"Device: {partition.device}")
+                output.append(f"  Mountpoint: {partition.mountpoint}")
+                output.append(f"  Filesystem type: {partition.fstype}")
+                try:
+                    usage = psutil.disk_usage(partition.mountpoint)
+                    output.append(f"  Total Size: {usage.total / 1024 ** 3:.2f} GB")
+                    output.append(f"  Used: {usage.used / 1024 ** 3:.2f} GB")
+                    output.append(f"  Free: {usage.free / 1024 ** 3:.2f} GB")
+                    output.append(f"  Usage: {usage.percent}%")
+                except PermissionError:
+                    output.append("  Permission Denied to access usage information")
+                output.append("")
+
+            self.terminalOutput.append("\n".join(output))
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def mount(self):
+        try:
+            output = []
+
+            partitions = psutil.disk_partitions()
+            for partition in partitions:
+                output.append(
+                    f"{partition.device} on {partition.mountpoint} type {partition.fstype} ({partition.opts})")
+
+            if output:
+                self.terminalOutput.append("\n".join(output))
+            else:
+                self.terminalOutput.append("Нет смонтированных файловых систем.")
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def unmount(self):
+        try:
+            command_text = self.commandInput.text().split()
+            mount_point = command_text[1] if len(command_text) > 1 else ''
+
+            if mount_point:
+                try:
+                    result = subprocess.run(['umount', mount_point], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    output = result.stdout.decode() if result.stdout else result.stderr.decode()
+                    self.terminalOutput.append(output)
+                except Exception as e:
+                    self.terminalOutput.append(f"Ошибка при размонтировании {mount_point}: {str(e)}")
+            else:
+                self.terminalOutput.append("Некорректная точка монтирования")
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def dmesg(self):
+        try:
+            dmesg_output = os.popen('dmesg').read()
+            if dmesg_output:
+                self.terminalOutput.append(dmesg_output)
+            else:
+                self.terminalOutput.append("Не удалось получить сообщения ядра.")
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def lsusb(self):
+        try:
+            result = subprocess.run(['lsusb'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            output = result.stdout.decode() if result.stdout else result.stderr.decode()
+            self.terminalOutput.append(output)
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def lspci(self):
+        try:
+            result = subprocess.run(['lspci'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            output = result.stdout.decode() if result.stdout else result.stderr.decode()
+            self.terminalOutput.append(output)
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def lsblk(self):
+        try:
+            result = subprocess.run(['lsblk'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            output = result.stdout.decode() if result.stdout else result.stderr.decode()
+            self.terminalOutput.append(output)
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def iwconfig(self):
+        try:
+            result = subprocess.run(['iwconfig'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            output = result.stdout.decode() if result.stdout else result.stderr.decode()
+            self.terminalOutput.append(output)
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def ifup(self):
+        interface = self.commandInput.text().split()[1] if len(self.commandInput.text().split()) > 1 else ''
+        try:
+            result = subprocess.run(['ifup', interface], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            output = result.stdout.decode() if result.stdout else result.stderr.decode()
+            self.terminalOutput.append(output)
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+    def ifdown(self):
+        interface = self.commandInput.text().split()[1] if len(self.commandInput.text().split()) > 1 else ''
+        try:
+            result = subprocess.run(['ifdown', interface], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            output = result.stdout.decode() if result.stdout else result.stderr.decode()
+            self.terminalOutput.append(output)
+        except Exception as e:
+            self.terminalOutput.append(str(e))
+        self.commandInput.clear()
+
+class DataWindow(QWidget):
+    def __init__(self, key, window_id):
+        super().__init__()
+
+        self.queue = MessageQueue(key)
+        self.window_id = window_id
+
+        self.setWindowTitle(f"Tasks {window_id}")
+        self.setGeometry(150 * window_id, 150 * window_id, 300, 200)
+
+        self.label = QLabel("", self)
+        layout = QVBoxLayout()
+        layout.addWidget(self.label)
+        self.setLayout(layout)
+
+        # Start the update thread
+        self.update_thread = threading.Thread(target=self.update_label)
+        self.update_thread.daemon = True
+        self.update_thread.start()
+
+    def update_label(self):
+        while True:
+            try:
+                message, _ = self.queue.receive(block=False)
+                self.label.setText(message.decode())
+            except Exception:
+                pass
+            time.sleep(1)
+
+
+class Receiver(QObject):
+    data_received = pyqtSignal(dict)
+
+    def __init__(self, key):
+        super().__init__()
+        self.queue = MessageQueue(key)
+
+    def run(self):
+        while True:
+            try:
+                message, _ = self.queue.receive(block=False)
+                user_info_str = message.decode()
+                rows = user_info_str.split('\n')
+                data = {"rows": rows}
+                self.data_received.emit(data)
+            except Exception:
+                pass
+            time.sleep(1)
+
+
+class UserTableWindow(QDialog):
+    def __init__(self, key, window_id):
+        super().__init__()
+
+        self.setWindowTitle(f"User Info Window {window_id}")
+        self.setGeometry(200, 200, 600, 400)
+
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+
+        self.users_info_label = QLabel("Информация о пользователях ОС:")
+        self.layout.addWidget(self.users_info_label)
+
+        self.users_table = QTableWidget()
+        self.users_table.setColumnCount(4)
+        headers = ["USER", "TTY", "FROM", "LOGIN@"]
+        self.users_table.setHorizontalHeaderLabels(headers)
+        self.layout.addWidget(self.users_table)
+
+        self.receiver = Receiver(key)
+        self.thread = QThread()
+        self.receiver.moveToThread(self.thread)
+        self.thread.started.connect(self.receiver.run)
+        self.receiver.data_received.connect(self.update_table)
+
+        self.thread.start()
+
+    def update_table(self, data):
+        rows = data["rows"]
+
+        self.users_table.setRowCount(0)
+        self.users_table.setRowCount(len(rows))
+
+        for i, row in enumerate(rows):
+            items = row.split()
+            for j, item in enumerate(items):
+                self.users_table.setItem(i, j, QTableWidgetItem(item))
+
+DEFAULT_DIR_CATALOG = "/home/user/superapp"
+
+
+def format_size(size):
+    for unit in ['', 'K', 'M', 'G', 'T', 'P', 'E', 'Z']:
+        if abs(size) < 1024.0:
+            return "%3.1f%sB" % (size, unit)
+        size /= 1024.0
+    return "%.1f%sB" % (size, 'Y')
+
+
+def directory_size(path):
+    total_size = 0
+    for dir_path, _, filenames in os.walk(path):
+        for f in filenames:
+            fp = os.path.join(dir_path, f)
+            total_size += os.path.getsize(fp)
+    return format_size(total_size)
+
+
+class LogFileDialog(QDialog):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle('Выберите лог-файл')
+        self.setFixedSize(400, 150)
+
+        layout = QVBoxLayout()
+
+        self.path_label = QLabel('Путь к лог-файлу:')
+        self.path_input = QLineEdit()
+        self.path_input.setPlaceholderText('/logs/name_file.log')
+        self.browse_button = QPushButton('Обзор...')
+        self.browse_button.clicked.connect(self.browse_file)
+
+        button_layout = QHBoxLayout()
+        self.ok_button = QPushButton('OK')
+        self.ok_button.clicked.connect(self.accept)
+        self.cancel_button = QPushButton('Отмена')
+        self.cancel_button.clicked.connect(self.reject)
+
+        button_layout.addWidget(self.ok_button)
+        button_layout.addWidget(self.cancel_button)
+
+        layout.addWidget(self.path_label)
+        layout.addWidget(self.path_input)
+        layout.addWidget(self.browse_button)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def browse_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, 'Выберите лог-файл', f'{DEFAULT_DIR_CATALOG}/logs/',
+                                                   'Log files (*.log)')
+        if file_path:
+            self.path_input.setText(file_path)
+
+    def get_file_path(self):
+        return self.path_input.text()
+
+
+def create_logs_with_msg(msg: str, file_name: str):
+    log_file_path = os.path.join(f"{DEFAULT_DIR_CATALOG}/logs", file_name)
+
+    with open(log_file_path, "a") as log_file:
+        log_file.write(msg + "\n")
+
+
+def create_trash():
+    trash_path = os.path.join(DEFAULT_DIR_CATALOG, 'Корзина')
+    if not os.path.exists(trash_path):
+        os.makedirs(trash_path)
+
+
+def create_logs():
+    logs_path = os.path.join(DEFAULT_DIR_CATALOG, 'logs')
+    if not os.path.exists(logs_path):
+        os.makedirs(logs_path)
+
+
+def create_system_folder():
+    system_path = os.path.join(DEFAULT_DIR_CATALOG, 'System')
+    if not os.path.exists(system_path):
+        os.makedirs(system_path)
+        open(os.path.join(system_path, 'placeholder.txt'), 'a').close()
+
+
+def create_initial_folders():
+    initial_folders = ['folder1', 'folder2']
+    for folder in initial_folders:
+        folder_path = os.path.join(DEFAULT_DIR_CATALOG, folder)
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+
 
 
 if __name__ == '__main__':
