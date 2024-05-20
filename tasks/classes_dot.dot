@@ -1,0 +1,8 @@
+digraph "classes_dot" {
+rankdir=BT
+charset="utf-8"
+"tasks.DataWindow" [color="black", fontcolor="black", label="{DataWindow|label\lqueue\lupdate_thread : Thread\lwindow_id\l|update_label()\l}", shape="record", style="solid"];
+"tasks.Receiver" [color="black", fontcolor="black", label="{Receiver|data_received\lqueue\l|run()\l}", shape="record", style="solid"];
+"tasks.UserTableWindow" [color="black", fontcolor="black", label="{UserTableWindow|layout\lreceiver\lthread\lusers_info_label\lusers_table\l|update_table(data)\l}", shape="record", style="solid"];
+"tasks.Receiver" -> "tasks.UserTableWindow" [arrowhead="diamond", arrowtail="none", fontcolor="green", label="receiver", style="solid"];
+}

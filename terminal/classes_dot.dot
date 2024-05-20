@@ -1,0 +1,5 @@
+digraph "classes_dot" {
+rankdir=BT
+charset="utf-8"
+"terminal.TerminalWindow" [color="black", fontcolor="black", label="{TerminalWindow|commandInput : NoneType\lrunButton : NoneType\lterminalOutput : NoneType\l|clear()\ldmesg()\lexecute_command()\lfdisk()\lhelp()\lifdown()\lifup()\linit_ui()\liwconfig()\lkill()\llsblk()\llsof()\llspci()\llsusb()\lmount()\lps()\ltop()\lunmount()\l}", shape="record", style="solid"];
+}

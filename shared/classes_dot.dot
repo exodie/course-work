@@ -1,0 +1,5 @@
+digraph "classes_dot" {
+rankdir=BT
+charset="utf-8"
+"shared.Shared" [color="black", fontcolor="black", label="{Shared|\l|directory_size(path)\lformat_size(size)\l}", shape="record", style="solid"];
+}

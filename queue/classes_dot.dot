@@ -1,0 +1,5 @@
+digraph "classes_dot" {
+rankdir=BT
+charset="utf-8"
+"queue.Queue" [color="black", fontcolor="black", label="{Queue|\l|receive_message()\lsend_message(message)\l}", shape="record", style="solid"];
+}

@@ -1,0 +1,5 @@
+digraph "classes_dot" {
+rankdir=BT
+charset="utf-8"
+"logs.LogFileDialog" [color="black", fontcolor="black", label="{LogFileDialog|browse_button\lcancel_button\lok_button\lpath_input\lpath_label\l|browse_file()\lget_file_path()\l}", shape="record", style="solid"];
+}

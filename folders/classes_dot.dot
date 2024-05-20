@@ -1,0 +1,5 @@
+digraph "classes_dot" {
+rankdir=BT
+charset="utf-8"
+"folders.Folders" [color="black", fontcolor="black", label="{Folders|\l|create_initial_folders()\lcreate_logs()\lcreate_system_folder()\lcreate_trash()\l}", shape="record", style="solid"];
+}
