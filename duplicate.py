@@ -1197,7 +1197,7 @@ class UserTableWindow(QDialog):
             for j, item in enumerate(items):
                 self.users_table.setItem(i, j, QTableWidgetItem(item))
 
-DEFAULT_DIR_CATALOG = "/home/user/superapp"
+DEFAULT_DIR_CATALOG = "/"
 
 
 def format_size(size):

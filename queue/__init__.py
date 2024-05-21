@@ -4,7 +4,7 @@ from sysv_ipc import IPC_CREAT, MessageQueue
 
 msg_queue = MessageQueue(1234, IPC_CREAT, mode=0o666)
 
-logging.basicConfig(filename='/home/user/superapp/logs/queue/message_queue.log', level=logging.INFO)
+logging.basicConfig(filename='../logs/queue/message_queue.log', level=logging.INFO)
 
 
 def send_message(message):

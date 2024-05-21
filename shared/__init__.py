@@ -1,6 +1,6 @@
 import os
 
-DEFAULT_DIR_CATALOG = "/home/user/superapp"
+DEFAULT_DIR_CATALOG = "/home/user/superapp/"
 
 
 def format_size(size):

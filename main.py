@@ -1,3 +1,4 @@
+import datetime
 import shutil
 import os
 import subprocess
@@ -8,9 +9,9 @@ import pyudev
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTreeView, QVBoxLayout, QWidget, QAction,
     QMenu, QMessageBox, QInputDialog, QFileSystemModel, QLineEdit, QPushButton, QToolBar, QShortcut,
-    QTextEdit
+    QTextEdit, QFileDialog
 )
-from PyQt5.QtCore import QModelIndex, Qt, QFileInfo
+from PyQt5.QtCore import QModelIndex, Qt, QFileInfo, QDir
 from PyQt5.QtGui import QKeySequence, QDrag
 
 from System.folders import create_trash, create_system_folder, create_initial_folders, create_logs
@@ -27,7 +28,7 @@ import time
 
 from sysv_ipc import IPC_CREAT, MessageQueue
 
-KEYS = [1234, 1235, 1236]
+KEYS = [1234, 1235, 1236, 1237]
 
 
 class CustomFileSystemModel(QFileSystemModel):
@@ -126,6 +127,7 @@ class SuperApp(QMainWindow):
 
         self.model = CustomFileSystemModel()
         self.model.setRootPath(DEFAULT_DIR_CATALOG)
+
         self.tree = QTreeView()
         self.tree.setModel(self.model)
         self.tree.setRootIndex(self.model.index(DEFAULT_DIR_CATALOG))
@@ -199,6 +201,10 @@ class SuperApp(QMainWindow):
         toolbar.addWidget(self.terminalButton)
         self.terminalButton.clicked.connect(self.open_terminal)
 
+        self.save_button = QPushButton('Сохранить отчет', self)
+        toolbar.addWidget(self.save_button)
+        self.save_button.clicked.connect(self.save_report)
+
         self.udev_context = pyudev.Context()
         self.monitor = pyudev.Monitor.from_netlink(self.udev_context)
         self.monitor.filter_by(subsystem='block')
@@ -217,7 +223,7 @@ class SuperApp(QMainWindow):
 
     def open_windows(self):
         if not self.windows:
-            for i in range(3):
+            for i in range(4):
                 if i == 0:
                     window = UserTableWindow(KEYS[i], i + 1)
                 else:
@@ -227,18 +233,22 @@ class SuperApp(QMainWindow):
 
     def collect_data(self):
         while True:
-            users = psutil.users()
-            user_info = [
-                f"{user.name} {user.terminal} {user.host} {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(user.started))}"
-                for user in users]
-            user_info_str = "\n".join(user_info)
+            w_output = subprocess.check_output(["w"]).decode("utf-8")
+
+            processed_output = []
+            for line in w_output.splitlines():
+                items = line.split()
+                processed_line = " ".join(items[:8])
+                processed_output.append(processed_line)
+
+            user_info_str = "\n".join(processed_output)
 
             total_processes = f"Total Processes: {len(psutil.pids())}"
             user_processes = f"User Processes: {len([p for p in psutil.process_iter(['username']) if p.info['username'] == psutil.Process().username()])}"
 
-            messages = [user_info_str, total_processes, user_processes]
+            messages = [user_info_str, total_processes, user_processes, user_processes]
 
-            for i in range(3):
+            for i in range(4):
                 self.queues[i].send(messages[i].encode(), block=False)
 
             time.sleep(5)
@@ -287,13 +297,30 @@ class SuperApp(QMainWindow):
 
             queue_message = f"REMOVE_DEVICE|{device_name}"
             log_message = f"Device {device_name} successfully disconnected."
-            log_path = "logs/actions.log"
+            log_path = "../logs/actions.log"
 
             self.update_processes(queue_message, log_message, log_path)
 
+    def save_report(self):
+        options = QFileDialog.Options()
+        file_name, _ = QFileDialog.getSaveFileName(self, "Сохранить отчет", QDir.homePath(), "Log Files (*.log);;All Files (*)", options=options)
+        if file_name:
+            self.combine_logs(file_name)
+
+    def combine_logs(self, output_file):
+        logs_dir = os.path.join(DEFAULT_DIR_CATALOG, "logs")
+        with open(output_file, 'w') as outfile:
+            for log_file_name in os.listdir(logs_dir):
+                log_file_path = os.path.join(logs_dir, log_file_name)
+                if os.path.isfile(log_file_path):
+                    with open(log_file_path, 'r') as infile:
+                        outfile.write(infile.read())
+
     def update_processes(self, queue_message, log_message, log_path):
-        self.log_widget.append(log_message)
-        create_logs_with_msg(log_message, log_path)
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_message_with_time = f"[{current_time}] {log_message}"
+        self.log_widget.append(log_message_with_time)
+        create_logs_with_msg(log_message_with_time, log_path)
         send_message(queue_message)
 
     def select_log_file(self):
@@ -318,7 +345,7 @@ class SuperApp(QMainWindow):
 
             queue_message = f"MOVE_FILE|{file_path}"
             log_message = f"Файл {os.path.basename(file_path)} успешно скопирован."
-            log_path = "logs/actions.log"
+            log_path = "../logs/actions.log"
 
             self.update_processes(queue_message, log_message, log_path)
         else:
@@ -352,7 +379,7 @@ class SuperApp(QMainWindow):
 
         queue_message = f"PASTE_ITEM||{destination_path}"
         log_message = f"Файл {os.path.basename(self.clipboard_path)} успешно вставлен в {destination_folder}."
-        log_path = "logs/actions.log"
+        log_path = "../logs/actions.log"
 
         self.update_processes(queue_message, log_message, log_path)
 
@@ -362,15 +389,35 @@ class SuperApp(QMainWindow):
 
     def open_system_terminal(self):
         subprocess.Popen(['gnome-terminal'])
+        queue_message = f"SYS||TERMINAL-OPEN"
+        log_message = f"Терминал запущен"
+        log_path = "../logs/systems.log"
+
+        self.update_processes(queue_message, log_message, log_path)
 
     def open_system_browser(self):
         subprocess.Popen(['xdg-open', 'https://www.google.com/'])
+        queue_message = f"SYS||BROWSER-OPEN"
+        log_message = f"Браузер запущен"
+        log_path = "../logs/systems.log"
+
+        self.update_processes(queue_message, log_message, log_path)
 
     def open_system_monitor(self):
         subprocess.Popen(['gnome-system-monitor'])
+        queue_message = f"SYS||MONITOR-OPEN"
+        log_message = f"Сис. Монитор запущен"
+        log_path = "../logs/systems.log"
+
+        self.update_processes(queue_message, log_message, log_path)
 
     def open_system_calculator(self):
         subprocess.Popen(['gnome-calculator'])
+        queue_message = f"SYS||CALC-OPEN"
+        log_message = f"Калькулятор запущен"
+        log_path = "../logs/systems.log"
+
+        self.update_processes(queue_message, log_message, log_path)
 
     def startDrag(self, supportedActions):
         drag = QDrag(self.tree)
@@ -379,39 +426,49 @@ class SuperApp(QMainWindow):
         drag.exec_(Qt.MoveAction)
 
     def dragMoveEvent(self, event):
-        target_index = self.tree.indexAt(event.pos())
-        target_path = self.model.filePath(target_index)
-
-        if self.is_system_folder(target_path) and not target_path.endswith("Корзина"):
-            event.ignore()
-        else:
-            event.accept()
+        event.accept()
 
     def dropEvent(self, event):
         source_indexes = self.tree.selectedIndexes()
         target_index = self.tree.indexAt(event.pos())
         target_path = self.model.filePath(target_index)
 
-        if self.is_system_folder(target_path):
-            if not target_path.endswith("Корзина"):
-                event.setDropAction(Qt.IgnoreAction)
-                event.ignore()
+        # Если цель перемещения - корень приложения
+        if not os.path.isdir(target_path) or target_path == self.model.rootPath():
+            target_path = DEFAULT_DIR_CATALOG
+
+        if not self.is_valid_move(source_indexes, target_path):
+            QMessageBox.warning(self, "Invalid Operation", "Cannot move or rename 'Система' or 'Корзина' folders.")
+            event.setDropAction(Qt.IgnoreAction)
+            event.ignore()
+            return
+
+        for source_index in source_indexes:
+            source_path = self.model.filePath(source_index)
+            base_name = os.path.basename(source_path)
+            new_path = os.path.join(target_path, base_name)
+            if os.path.exists(new_path):
                 return
-        else:
-            for source_index in source_indexes:
-                source_path = self.model.filePath(source_index)
-                base_name = os.path.basename(source_path)
-                new_path = os.path.join(target_path, base_name)
-                if os.path.exists(new_path):
-                    return
-                os.rename(source_path, new_path)
+            os.rename(source_path, new_path)
 
         self.model.setRootPath(DEFAULT_DIR_CATALOG)
 
-    def is_system_folder(self, folder_path):
-        restricted_folders = ['Система']
-        folder_name = os.path.basename(folder_path)
-        return folder_name in restricted_folders
+    def is_valid_move(self, source_indexes, target_path):
+        restricted_folders = ['System', 'Корзина']
+
+        for source_index in source_indexes:
+            source_path = self.model.filePath(source_index)
+            source_folder_name = os.path.basename(source_path)
+            if source_folder_name in restricted_folders:
+                return False
+
+            if any(folder in source_path for folder in restricted_folders):
+                return False
+
+            if any(folder in target_path for folder in restricted_folders):
+                return False
+
+        return True
 
     def show_about_info(self):
         QMessageBox.information(self, 'О программе',
@@ -421,7 +478,7 @@ class SuperApp(QMainWindow):
 
         queue_message = "ABOUT_INFO"
         log_message = f"Вкладка 'О программе' успешно открыта."
-        log_path = "logs/actions.log"
+        log_path = "../logs/actions.log"
 
         self.update_processes(queue_message, log_message, log_path)
 
@@ -437,7 +494,7 @@ class SuperApp(QMainWindow):
 
         queue_message = "SHORTCUTS"
         log_message = f"Вкладка 'Горячие клавиши' успешно открыта."
-        log_path = "logs/actions.log"
+        log_path = "../logs/actions.log"
 
         self.update_processes(queue_message, log_message, log_path)
 
@@ -454,7 +511,7 @@ class SuperApp(QMainWindow):
 
                 queue_message = f"OPEN_ITEM|{file_path}"
                 log_message = f"Файл {file_path} успешно открыт."
-                log_path = "logs/actions.log"
+                log_path = "../logs/actions.log"
 
                 self.update_processes(queue_message, log_message, log_path)
         else:
